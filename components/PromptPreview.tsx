@@ -13,18 +13,15 @@ interface Props {
   generating: boolean;
 }
 
-// 根据自定义元素 + 分析结果构建完整提示词
-function buildCustomElementPrompt(element: string, analysis: AnalyzeResult): string {
-  const colors = (analysis.color_palette?.length > 0)
-    ? analysis.color_palette.join(' / ')
-    : analysis.color_hint;
+// 根据自定义元素 + 颜色字符串构建完整提示词
+function buildCustomElementPrompt(element: string, analysis: AnalyzeResult, colorsStr: string): string {
   const base = analysis.secondary_elements[0] || '';
   const decos = analysis.secondary_elements.slice(1).filter(Boolean).join('. ');
 
   return [
     `A ${element} icon,`,
     `rendered in 3D icon style — clean simplified geometric form, flat icon aesthetic in 3D, NOT photorealistic, smooth surfaces with no fine texture detail.`,
-    `Each distinct structural component uses a DIFFERENT color from the palette: ${colors}.`,
+    `Each distinct structural component uses a DIFFERENT color from the palette: ${colorsStr}.`,
     `Clear color-blocking between parts, smooth surfaces.`,
     base ? `Placed on ${base}.` : '',
     decos ? `${decos} surrounding the scene.` : '',
@@ -47,18 +44,52 @@ export default function PromptPreview({
 }: Props) {
   const [isCustomMode, setIsCustomMode] = useState(false);
   const [customElementText, setCustomElementText] = useState('');
+  // 激活色板：从 analysis 初始化，用户可删减
+  const [activePalette, setActivePalette] = useState<string[]>(analysis.color_palette || []);
 
-  // 切换到预设选项时退出自定义模式
-  const handleSelectPreset = (id: string) => {
+  // analysis 更新（重新分析）时重置色板
+  useEffect(() => {
+    setActivePalette(analysis.color_palette || []);
     setIsCustomMode(false);
-    onSelectOption(id);
+    setCustomElementText('');
+  }, [analysis]);
+
+  // 将激活色板注入提示词字符串（替换原始色板字符串）
+  const injectPalette = (prompt: string, palette: string[]): string => {
+    if (!analysis.color_palette?.length || !palette.length) return prompt;
+    const originalStr = analysis.color_palette.join(' / ');
+    const newStr = palette.join(' / ');
+    return prompt.includes(originalStr) ? prompt.replace(originalStr, newStr) : prompt;
   };
 
-  // 自定义元素变化时实时更新提示词
+  const activeColorsStr = activePalette.length > 0 ? activePalette.join(' / ') : analysis.color_hint;
+
+  // 删除某个颜色
+  const handleRemoveColor = (idx: number) => {
+    const newPalette = activePalette.filter((_, i) => i !== idx);
+    setActivePalette(newPalette);
+    const newColorsStr = newPalette.length > 0 ? newPalette.join(' / ') : analysis.color_hint;
+    if (isCustomMode && customElementText.trim()) {
+      onPromptChange(buildCustomElementPrompt(customElementText.trim(), analysis, newColorsStr));
+    } else {
+      onPromptChange(injectPalette(editablePrompt, newPalette));
+    }
+  };
+
+  // 切换预设选项：退出自定义模式，并注入激活色板
+  const handleSelectPreset = (id: string) => {
+    setIsCustomMode(false);
+    const option = analysis.concept_options.find((o) => o.id === id);
+    if (!option) return;
+    onSelectOption(id);
+    onPromptChange(injectPalette(option.full_prompt, activePalette));
+  };
+
+  // 自定义元素或色板变化时重新构建提示词
   useEffect(() => {
     if (!isCustomMode || !customElementText.trim()) return;
-    onPromptChange(buildCustomElementPrompt(customElementText.trim(), analysis));
-  }, [customElementText, isCustomMode]); // eslint-disable-line react-hooks/exhaustive-deps
+    onPromptChange(buildCustomElementPrompt(customElementText.trim(), analysis, activeColorsStr));
+  }, [customElementText, isCustomMode, activePalette]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentOption = isCustomMode ? null : analysis.concept_options.find((o) => o.id === selectedOptionId);
   const zhDesc = currentOption?.full_prompt_zh ?? (isCustomMode ? '' : analysis.full_prompt_zh);
@@ -102,21 +133,72 @@ export default function PromptPreview({
           <p className="text-[12px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
             {analysis.style_extracted}
           </p>
-          {/* 多色板色块预览 */}
+          {/* 多色板色块预览 + 删除 */}
           {analysis.color_palette?.length > 0 ? (
             <div className="pt-2 flex flex-col gap-1.5">
-              <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
-                提取色板
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
+                  提取色板
+                </p>
+                <p className="text-[10px]" style={{ color: 'var(--text-dim)' }}>
+                  {activePalette.length}/{analysis.color_palette.length} 启用 · 点击 × 移除
+                </p>
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {analysis.color_palette.map((entry, i) => {
                   const hexMatch = entry.match(/#([0-9A-Fa-f]{3,8})/);
                   const hex = hexMatch ? hexMatch[0] : null;
                   const label = entry.split(' — ')[0].trim();
+                  const isActive = activePalette.includes(entry);
                   return (
-                    <div key={i} className="flex items-center gap-1.5 rounded-full px-2 py-1" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)' }}>
-                      {hex && <span className="inline-block w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/10" style={{ background: hex }} />}
-                      <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{label}</span>
+                    <div
+                      key={i}
+                      className="group flex items-center gap-1.5 rounded-full px-2 py-1 transition-all"
+                      style={{
+                        background: isActive ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)',
+                        border: `1px solid ${isActive ? 'var(--border)' : 'rgba(255,255,255,0.06)'}`,
+                        opacity: isActive ? 1 : 0.38,
+                      }}
+                    >
+                      {hex && (
+                        <span
+                          className="inline-block w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/10"
+                          style={{ background: hex, filter: isActive ? 'none' : 'grayscale(1)' }}
+                        />
+                      )}
+                      <span className="text-[10px]" style={{ color: isActive ? 'var(--text-muted)' : 'var(--text-dim)' }}>
+                        {label}
+                      </span>
+                      {isActive ? (
+                        <button
+                          onClick={() => handleRemoveColor(activePalette.indexOf(entry))}
+                          disabled={generating || activePalette.length <= 1}
+                          className="ml-0.5 flex items-center justify-center w-3.5 h-3.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity disabled:cursor-not-allowed"
+                          style={{ color: 'var(--text-dim)' }}
+                          title="移除此颜色"
+                        >
+                          <i className="ri-close-line text-[10px]" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            const newPalette = [...activePalette, entry];
+                            setActivePalette(newPalette);
+                            const newColorsStr = newPalette.join(' / ');
+                            if (isCustomMode && customElementText.trim()) {
+                              onPromptChange(buildCustomElementPrompt(customElementText.trim(), analysis, newColorsStr));
+                            } else {
+                              onPromptChange(injectPalette(editablePrompt, newPalette));
+                            }
+                          }}
+                          disabled={generating}
+                          className="ml-0.5 flex items-center justify-center w-3.5 h-3.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                          style={{ color: 'var(--text-dim)' }}
+                          title="重新启用此颜色"
+                        >
+                          <i className="ri-add-line text-[10px]" />
+                        </button>
+                      )}
                     </div>
                   );
                 })}
